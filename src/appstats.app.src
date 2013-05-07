@@ -8,5 +8,6 @@
                   stdlib,
                   eleveldb
                  ]},
+  {mod, {appstats_app, []}},
   {env, []}
  ]}.

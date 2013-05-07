@@ -12,10 +12,13 @@
         ]).
 
 -export([open/1,
+         start_link/1,
          write/2,
          read/5,
          first/1,
-         last/1
+         last/1,
+         timespan/1,
+         names/3
         ]).
 
 %% ------------------------------------------------------------------
@@ -34,6 +37,7 @@
 %% API Function Definitions
 %% ------------------------------------------------------------------
 
+%% TODO: sample_rate
 -record(event, {name, value, timestamp=epoch(), data}).
 
 new_event(Name, Value) ->
@@ -54,6 +58,9 @@ epoch({MegaSecs, Secs, MicroSecs}) ->
     (MegaSecs * 1000 * 1000 + Secs) * 1000 + trunc(MicroSecs/1000).
 
 open(Path) ->
+    appstats_sup:start_worker(Path).
+
+start_link(Path) ->
     gen_server:start_link(?MODULE, Path, []).
 
 write(Pid, Events) ->
@@ -68,16 +75,22 @@ first(Pid) ->
 last(Pid) ->
     gen_server:call(Pid, last).
 
+timespan(Pid) ->
+    gen_server:call(Pid, timespan).
+
+names(Pid, Start, Stop) ->
+    gen_server:call(Pid, {names, Start, Stop}).
+
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
--record(state, {ref}).
+-record(state, {path, ref}).
 
 init(Path) ->
     case eleveldb:open(Path, [{create_if_missing, true}]) of
         {ok, Ref} ->
-            {ok, #state{ref=Ref}};
+            {ok, #state{path=Path, ref=Ref}};
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -102,7 +115,25 @@ handle_call(first, _From, State) ->
 
 handle_call(last, _From, State) ->
     Event = get_event(State#state.ref, last),
-    {reply, Event, State}.
+    {reply, Event, State};
+
+handle_call(timespan, _From, State) ->
+    {ok, Itr} = eleveldb:iterator(State#state.ref, []),
+    {ok, K1, _} = eleveldb:iterator_move(Itr, first),
+    {ok, K2, _} = eleveldb:iterator_move(Itr, last),
+    ok = eleveldb:iterator_close(Itr),
+    {e, T1, _, _} = sext:decode(K1),
+    {e, T2, _, _} = sext:decode(K2),
+    {reply, {T1, T2}, State};
+
+handle_call({names, Start, Stop}, From, State) ->
+    case validate_range(Start, Stop) of
+        true ->
+            spawn(fun() -> fold_names(State#state.ref, Start, Stop, From) end),
+            {noreply, State};
+        false ->
+            {reply, {error, bad_range}, State}
+    end.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -174,7 +205,7 @@ fold_fun(TargetName, Start, Stop, Step) ->
     end.
 
 validate_range(Start, Stop) ->
-    Stop > Start andalso (Stop - Start) < 1000000.
+    Stop > Start andalso (Stop - Start) < 14400000. %% 4 hours
 
 slice(Start, Step, Ts) ->
     trunc(Start + trunc((Ts - Start) / Step) * Step).
@@ -189,3 +220,24 @@ get_event(Ref, Pos) ->
     {e, Timestamp, Name, _} = sext:decode(KeyBin),
     {Value, Data} = binary_to_term(ValueBin),
     {Name, Value, Timestamp, Data}.
+
+fold_names(Ref, Start, Stop, From) ->
+    Fun = fun(KeyBin, Acc) ->
+            {e, Timestamp, Name, _} = sext:decode(KeyBin),
+            case Timestamp >= Stop of
+                true ->
+                    throw({break, Acc});
+                false ->
+                    ok
+            end,
+            sets:add_element(Name, Acc)
+    end,
+    FirstKey = sext:encode({e, Start, <<>>, <<>>}),
+    FoldOpts = [{first_key, FirstKey}],
+    try
+        Names = eleveldb:fold_keys(Ref, Fun, sets:new(), FoldOpts),
+        gen_server:reply(From, sets:to_list(Names))
+    catch
+        {break, Names1} ->
+            gen_server:reply(From, sets:to_list(Names1))
+    end.
