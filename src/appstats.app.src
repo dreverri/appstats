@@ -1,0 +1,12 @@
+{application, appstats,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  eleveldb
+                 ]},
+  {env, []}
+ ]}.
