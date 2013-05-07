@@ -13,7 +13,9 @@
 
 -export([open/1,
          write/2,
-         read/5
+         read/5,
+         first/1,
+         last/1
         ]).
 
 %% ------------------------------------------------------------------
@@ -60,6 +62,12 @@ write(Pid, Events) ->
 read(Pid, Name, Start, Stop, Step) ->
     gen_server:call(Pid, {read, Name, Start, Stop, Step}).
 
+first(Pid) ->
+    gen_server:call(Pid, first).
+
+last(Pid) ->
+    gen_server:call(Pid, last).
+
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
@@ -86,7 +94,15 @@ handle_call({read, Name, Start, Stop, Step}, From, State) ->
             {noreply, State};
         false ->
             {reply, {error, bad_range}, State}
-    end.
+    end;
+
+handle_call(first, _From, State) ->
+    Event = get_event(State#state.ref, first),
+    {reply, Event, State};
+
+handle_call(last, _From, State) ->
+    Event = get_event(State#state.ref, last),
+    {reply, Event, State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -165,3 +181,11 @@ slice(Start, Step, Ts) ->
 
 holes(PreviousSlice, CurrentSlice, Step) ->
     lists:reverse([{S, []} || S <- lists:seq(PreviousSlice, CurrentSlice, Step)]).
+
+get_event(Ref, Pos) ->
+    {ok, Itr} = eleveldb:iterator(Ref, []),
+    {ok, KeyBin, ValueBin} = eleveldb:iterator_move(Itr, Pos),
+    ok = eleveldb:iterator_close(Itr),
+    {e, Timestamp, Name, _} = sext:decode(KeyBin),
+    {Value, Data} = binary_to_term(ValueBin),
+    {Name, Value, Timestamp, Data}.
