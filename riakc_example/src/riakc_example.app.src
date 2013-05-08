@@ -1,0 +1,12 @@
+{application, riakc_example,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { riakc_example_app, []}},
+  {env, []}
+ ]}.
