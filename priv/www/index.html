@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Appstress</title>
+<style>
+
+@import url(style.css);
+
+</style>
+</head>
+<body>
+<script src="d3.v2.js"></script>
+<script src="cubism.v1.js"></script>
+<script>
+
+d3.json("sessions", function(sessions) {
+    if (!sessions) return console.log("error loading sessions");
+
+    // TODO: allow users to navigate through different sessions
+    var session_id = sessions[0];
+    var session_base_url = "session/" + session_id;
+    var timespan_url = session_base_url + "/timespan";
+
+    d3.json(timespan_url, function(timespan) {
+        if (!timespan) return console.log("error loading timespan");
+
+        var names_url = session_base_url + "/names" + 
+            "?start=" + timespan.start +
+            "&stop=" + timespan.stop;
+
+        d3.json(names_url, function(names) {
+            if (!names) return console.log("error loading names");
+
+            var height = 30;
+            var size = 960;
+            var step = 5e3;
+            //var shift = new Date().getTime() - timespan.stop;
+            
+            // TODO: give user control over time window
+            // start/stop, range, zoom
+            var context = cubism.context().
+                //stop().
+                step(step).
+                size(size)
+                //serverDelay(shift);
+
+            d3.select("body").selectAll(".axis").
+                data(["top", "bottom"]).
+                enter().append("div").
+                attr("class", function(d) { return d + " axis"; }).
+                each(function(d) { d3.select(this).call(context.axis().ticks(12).orient(d)); });
+
+            d3.select("body").append("div").
+                attr("class", "rule").
+                call(context.rule());
+
+            var data_base_url = session_base_url + "/data";
+            var metrics = [];
+            var types = ["count", "max", "mean", "min"];
+
+            for (var j in names) {
+                for (var i in types) {
+                    metrics.push(appstress(data_base_url, names[j], types[i]));
+                }
+            }
+
+            d3.select("body").selectAll(".horizon").
+                data(metrics).
+                enter().insert("div", ".bottom").
+                attr("class", "horizon").
+                call(context.horizon().height(height));
+    
+            // TODO: this is not appearing in the correct location
+            context.on("focus", function(i) {
+                d3.selectAll(".value").style("right", i == null ? null : context.size() - i + "px");
+            });
+
+            // TODO: chart labels are too large
+            function appstress(data_url, name, t) {
+                return context.metric(function(start, stop, step, callback) {
+                    var url = data_url +
+                        "?name=" + name +
+                        "&start=" + start.getTime() +
+                        "&stop=" + stop.getTime() +
+                        "&step=" + step;
+
+                    d3.json(url, function(data) {
+                        if (!data) return callback(new Error("unable to load data"));
+
+                        callback(null, data.map(function(d) { return d[t]; }));
+                    });
+                }, name + ":" + t);
+            };
+        });
+    });
+});
+
+</script>
+</body>
+</html>
