@@ -40,6 +40,7 @@
 %% TODO: sample_rate
 -record(event, {name, value, timestamp=epoch(), data}).
 
+%% TODO: move event functions to separate module
 new_event(Name, Value) ->
     new_event(Name, Value, []).
 

@@ -48,7 +48,7 @@ to_json(Req, State) ->
     Start = State#state.start,
     Stop = State#state.stop,
     Step = State#state.step,
-    Results = appstats:read(Pid, Name, Start, Stop, Step),
+    Results = appstats_session:read(Pid, Name, Start, Stop, Step),
     Body = json_encode_results(Results),
     {Body, Req, State}.
 

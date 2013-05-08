@@ -42,7 +42,7 @@ to_json(Req, State) ->
     Pid = State#state.pid,
     Start = State#state.start,
     Stop = State#state.stop,
-    Names = appstats:names(Pid, Start, Stop),
+    Names = appstats_session:names(Pid, Start, Stop),
     {jiffy:encode(Names), Req, Pid}.
 
 run_check(Check, {false, Req, State}) ->
