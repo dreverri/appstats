@@ -32,9 +32,9 @@ d3.json("sessions", function(sessions) {
         d3.json(names_url, function(names) {
             if (!names) return console.log("error loading names");
 
-            var height = 30;
+            var height = 20;
             var size = 960;
-            var step = 3e3;
+            var step = 10e3;
             //var shift = new Date().getTime() - timespan.stop;
             
             // TODO: give user control over time window
@@ -42,7 +42,8 @@ d3.json("sessions", function(sessions) {
             var context = cubism.context().
                 //stop().
                 step(step).
-                size(size)
+                size(size).
+                serverDelay(10e3);
                 //serverDelay(shift);
 
             d3.select("body").selectAll(".axis").
@@ -57,7 +58,7 @@ d3.json("sessions", function(sessions) {
 
             var data_base_url = session_base_url + "/data";
             var metrics = [];
-            var types = ["count", "max", "mean", "min"];
+            var types = ["mean"];
 
             for (var j in names) {
                 for (var i in types) {
@@ -80,15 +81,20 @@ d3.json("sessions", function(sessions) {
             function appstress(data_url, name, t) {
                 return context.metric(function(start, stop, step, callback) {
                     var url = data_url +
-                        "?name=" + name +
-                        "&start=" + start.getTime() +
+                        "?start=" + start.getTime() +
                         "&stop=" + stop.getTime() +
                         "&step=" + step;
 
                     d3.json(url, function(data) {
                         if (!data) return callback(new Error("unable to load data"));
 
-                        callback(null, data.map(function(d) { return d[t]; }));
+                        callback(null, data.map(function(d) {
+                            if (typeof d["data"][name] != "undefined") {
+                                return d["data"][name][t]; 
+                            } else {
+                                return NaN;
+                            }
+                        }));
                     });
                 }, name + ":" + t);
             };

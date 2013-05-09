@@ -181,7 +181,7 @@ fold(Ref, Name, Start, Stop, Step, From) ->
     FirstKey = sext:encode({e, Start, Name, <<>>}),
     FoldOpts = [{first_key, FirstKey}],
     try
-        Results0 = eleveldb:fold(Ref, Fun, [{Start, []}], FoldOpts),
+        Results0 = eleveldb:fold(Ref, Fun, [{Start, dict:new()}], FoldOpts),
         Results = fill_in_the_holes(Results0, Start, Stop, Step),
         Summary = summarize(Results),
         gen_server:reply(From, Summary)
@@ -204,7 +204,10 @@ fill_in_the_holes(Results, Start, Stop, Step) ->
 
 summarize(Results) ->
     lists:foldl(fun({T, Values}, Acc) ->
-                [{T, bear:get_statistics(Values)}|Acc]
+                Summary = dict:fold(fun(N, V, SliceAcc) ->
+                                [{N, bear:get_statistics(V)}|SliceAcc]
+                        end, [], Values),
+                [{T, Summary}|Acc]
         end, [], Results).
 
 fold_fun(TargetName, Start, Stop, Step) ->
@@ -218,28 +221,37 @@ fold_fun(TargetName, Start, Stop, Step) ->
                 false ->
                     ok
             end,
-            case Name == TargetName of
+            case match_name(TargetName, Name) of
                 true ->
                     {V, _Data} = binary_to_term(ValueBin),
                     if
                         Slice == PreviousSlice ->
-                            [{Slice, [V|Values]}|Acc];
+                            Values1 = dict:append(Name, V, Values),
+                            [{Slice, Values1}|Acc];
                         Slice == PreviousSlice + Step ->
-                            [{Slice, [V]}|All];
+                            Values1 = dict:append(Name, V, dict:new()),
+                            [{Slice, Values1}|All];
                         true ->
                             Holes = holes(PreviousSlice + Step, Slice - Step, Step),
-                            [{Slice, [V]}|Holes ++ All]
+                            Values1 = dict:append(Name, V, dict:new()),
+                            [{Slice, Values1}|Holes ++ All]
                     end;
                 false ->
                     All
             end
     end.
 
+match_name(undefined, _) ->
+    true;
+
+match_name(TargetName, Name) ->
+    TargetName == Name.
+
 slice(Ts, Start, Step) ->
     trunc(Start + trunc((Ts - Start) / Step) * Step).
 
 holes(FromSlice, ToSlice, Step) ->
-    lists:reverse([{S, []} || S <- lists:seq(FromSlice, ToSlice, Step)]).
+    lists:reverse([{S, dict:new()} || S <- lists:seq(FromSlice, ToSlice, Step)]).
 
 get_event(Ref, Pos) ->
     {ok, Itr} = eleveldb:iterator(Ref, []),

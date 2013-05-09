@@ -25,7 +25,8 @@
          resource_exists/2,
          malformed_request/2,
          content_types_provided/2,
-         to_json/2
+         to_json/2,
+         json_encode_results/1
         ]).
 
 -record(state, {pid,
@@ -113,7 +114,7 @@ check_step(Req, State) ->
 check_name(Req, State) ->
     case cowboy_req:qs_val(<<"name">>, Req) of
         {undefined, Req1} ->
-            {true, Req1, State};
+            {false, Req1, State};
         {Name, Req1} ->
             {false, Req1, State#state{name=Name}}
     end.
@@ -123,11 +124,15 @@ json_encode_results(Results) ->
     jiffy:encode(Results1).
 
 json_encode_entry({Epoch, undefined}) ->
-    {[{<<"timestamp">>, Epoch}]};
+    {[{<<"timestamp">>, Epoch}, {<<"data">>, {[]}}]};
 
-json_encode_entry({Epoch, Stats}) ->
+json_encode_entry({Epoch, Data}) ->
+    SliceData = [{Name, json_encode_stats(Stats)} || {Name, Stats} <- Data],
     {[{<<"timestamp">>, Epoch},
-      {<<"count">>, proplists:get_value(n, Stats)},
+      {<<"data">>, {SliceData}}]}.
+
+json_encode_stats(Stats) ->
+    {[{<<"count">>, proplists:get_value(n, Stats)},
       {<<"min">>, proplists:get_value(min, Stats)},
       {<<"mean">>, proplists:get_value(arithmetic_mean, Stats)},
       {<<"max">>, proplists:get_value(max, Stats)}]}.
