@@ -49,5 +49,5 @@ content_types_provided(Req, State) ->
 
 to_json(Req, Pid) ->
     {T1, T2} = appstats_session:timespan(Pid),
-    Body = jiffy:encode({[{<<"start">>, T1}, {<<"stop">>, T2}]}),
+    Body = jsx:encode([{<<"start">>, T1}, {<<"stop">>, T2}]),
     {Body, Req, Pid}.

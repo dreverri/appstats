@@ -121,18 +121,18 @@ check_name(Req, State) ->
 
 json_encode_results(Results) ->
     Results1 = [json_encode_entry(Entry) || Entry <- Results],
-    jiffy:encode(Results1).
+    jsx:encode(Results1).
 
 json_encode_entry({Epoch, undefined}) ->
-    {[{<<"timestamp">>, Epoch}, {<<"data">>, {[]}}]};
+    [{<<"timestamp">>, Epoch}, {<<"data">>, [{}]}];
 
 json_encode_entry({Epoch, Data}) ->
     SliceData = [{Name, json_encode_stats(Stats)} || {Name, Stats} <- Data],
-    {[{<<"timestamp">>, Epoch},
-      {<<"data">>, {SliceData}}]}.
+    [{<<"timestamp">>, Epoch},
+     {<<"data">>, SliceData}].
 
 json_encode_stats(Stats) ->
-    {[{<<"count">>, proplists:get_value(n, Stats)},
-      {<<"min">>, proplists:get_value(min, Stats)},
-      {<<"mean">>, proplists:get_value(arithmetic_mean, Stats)},
-      {<<"max">>, proplists:get_value(max, Stats)}]}.
+    [{<<"count">>, proplists:get_value(n, Stats)},
+     {<<"min">>, proplists:get_value(min, Stats)},
+     {<<"mean">>, proplists:get_value(arithmetic_mean, Stats)},
+     {<<"max">>, proplists:get_value(max, Stats)}].

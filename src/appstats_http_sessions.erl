@@ -39,4 +39,4 @@ content_types_provided(Req, State) ->
 
 to_json(Req, State) ->
     Workers = appstats_sup:list_workers(),
-    {jiffy:encode(Workers), Req, State}.
+    {jsx:encode(Workers), Req, State}.

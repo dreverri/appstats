@@ -63,7 +63,7 @@ to_json(Req, State) ->
     Start = State#state.start,
     Stop = State#state.stop,
     Names = appstats_session:names(Pid, Start, Stop),
-    {jiffy:encode(Names), Req, Pid}.
+    {jsx:encode(Names), Req, Pid}.
 
 run_check(Check, {false, Req, State}) ->
     Check(Req, State);
