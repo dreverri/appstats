@@ -88,7 +88,7 @@ write(Pid, Events) ->
     gen_server:call(Pid, {write, Events}).
 
 read(Pid, Name, Start, Stop, Step) ->
-    gen_server:call(Pid, {read, Name, Start, Stop, Step}).
+    gen_server:call(Pid, {read, Name, Start, Stop, Step}, infinity).
 
 first(Pid) ->
     gen_server:call(Pid, first).
@@ -100,7 +100,7 @@ timespan(Pid) ->
     gen_server:call(Pid, timespan).
 
 names(Pid, Start, Stop) ->
-    gen_server:call(Pid, {names, Start, Stop}).
+    gen_server:call(Pid, {names, Start, Stop}, infinity).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -110,7 +110,7 @@ names(Pid, Start, Stop) ->
 
 init(Path) ->
     filelib:ensure_dir(Path),
-    case eleveldb:open(Path, [{create_if_missing, true}]) of
+    case eleveldb:open(Path, [{create_if_missing, true}, {compression, true}]) of
         {ok, Ref} ->
             {ok, #state{path=Path, ref=Ref}};
         {error, Reason} ->
@@ -123,13 +123,8 @@ handle_call({write, Events}, _From, State) ->
     {reply, Reply, State};
 
 handle_call({read, Name, Start, Stop, Step}, From, State) ->
-    case validate_range(Start, Stop) of
-        true ->
-            spawn(fun() -> fold(State#state.ref, Name, Start, Stop, Step, From) end),
-            {noreply, State};
-        false ->
-            {reply, {error, bad_range}, State}
-    end;
+    spawn(fun() -> fold(State#state.ref, Name, Start, Stop, Step, From) end),
+    {noreply, State};
 
 handle_call(first, _From, State) ->
     Event = get_event(State#state.ref, first),
@@ -150,13 +145,11 @@ handle_call(timespan, _From, State) ->
     {reply, {T1, T2}, State};
 
 handle_call({names, Start, Stop}, From, State) ->
-    case validate_range(Start, Stop) of
-        true ->
-            spawn(fun() -> fold_names(State#state.ref, Start, Stop, From) end),
-            {noreply, State};
-        false ->
-            {reply, {error, bad_range}, State}
-    end.
+    spawn(fun() -> fold_names(State#state.ref, Start, Stop, From) end),
+    {noreply, State};
+
+handle_call(ref, _From, State) ->
+    {reply, State#state.ref, State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -188,11 +181,25 @@ fold(Ref, Name, Start, Stop, Step, From) ->
     FirstKey = sext:encode({e, Start, Name, <<>>}),
     FoldOpts = [{first_key, FirstKey}],
     try
-        Results = eleveldb:fold(Ref, Fun, [{Start, []}], FoldOpts),
-        gen_server:reply(From, summarize(Results))
+        Results0 = eleveldb:fold(Ref, Fun, [{Start, []}], FoldOpts),
+        Results = fill_in_the_holes(Results0, Start, Stop, Step),
+        Summary = summarize(Results),
+        gen_server:reply(From, Summary)
     catch
         {break, Results1} ->
-            gen_server:reply(From, summarize(Results1))
+            Results2 = fill_in_the_holes(Results1, Start, Stop, Step),
+            Summary1 = summarize(Results2),
+            gen_server:reply(From, Summary1)
+    end.
+
+fill_in_the_holes(Results, Start, Stop, Step) ->
+    LastSlice = slice(Stop, Start, Step),
+    case Results of
+        [{LastSlice, _}|_] ->
+            Results;
+        [{PreviousSlice, _}|_] ->
+            Holes = holes(PreviousSlice + Step, LastSlice - Step, Step),
+            Holes ++ Results
     end.
 
 summarize(Results) ->
@@ -201,20 +208,13 @@ summarize(Results) ->
         end, [], Results).
 
 fold_fun(TargetName, Start, Stop, Step) ->
-    LastSlice = slice(Start, Step, Stop),
+    LastSlice = slice(Stop, Start, Step),
     fun({KeyBin, ValueBin}, All = [{PreviousSlice, Values}|Acc]) ->
             {e, Timestamp, Name, _} = sext:decode(KeyBin),
-            Slice = slice(Start, Step, Timestamp),
+            Slice = slice(Timestamp, Start, Step),
             case Slice >= LastSlice of
                 true ->
-                    MissingSlices = (LastSlice - PreviousSlice)/Step,
-                    case MissingSlices > 0 of
-                        true ->
-                            Holes1 = holes(PreviousSlice + Step, LastSlice - Step, Step),
-                            throw({break, Holes1 ++ All});
-                        false ->
-                            throw({break, All})
-                    end;
+                    throw({break, All});
                 false ->
                     ok
             end,
@@ -235,14 +235,11 @@ fold_fun(TargetName, Start, Stop, Step) ->
             end
     end.
 
-validate_range(Start, Stop) ->
-    Stop > Start andalso (Stop - Start) < 14400000. %% 4 hours
-
-slice(Start, Step, Ts) ->
+slice(Ts, Start, Step) ->
     trunc(Start + trunc((Ts - Start) / Step) * Step).
 
-holes(PreviousSlice, CurrentSlice, Step) ->
-    lists:reverse([{S, []} || S <- lists:seq(PreviousSlice, CurrentSlice, Step)]).
+holes(FromSlice, ToSlice, Step) ->
+    lists:reverse([{S, []} || S <- lists:seq(FromSlice, ToSlice, Step)]).
 
 get_event(Ref, Pos) ->
     {ok, Itr} = eleveldb:iterator(Ref, []),
