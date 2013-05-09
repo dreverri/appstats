@@ -10,7 +10,7 @@ simple_test() ->
                                                             N <- [<<"foo">>, <<"bar">>, <<"baz">>],
                                                             T <- [Start - 1, Start, Start + 1]],
     ok = appstats_session:write(Pid, Events),
-    [{Time, Summary}] = appstats_session:read(Pid, <<"foo">>, Start, Start + 1, 1),
+    [{Time, [{_, Summary}]}] = appstats_session:read(Pid, <<"foo">>, Start, Start + 1, 1),
     ?assertEqual(Start, Time),
     ?assertEqual(13, length(Summary)).
 
