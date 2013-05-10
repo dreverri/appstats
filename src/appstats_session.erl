@@ -135,14 +135,17 @@ handle_call(last, _From, State) ->
     {reply, Event, State};
 
 handle_call(timespan, _From, State) ->
-    %% TODO: handle empty dataset
     {ok, Itr} = eleveldb:iterator(State#state.ref, []),
-    {ok, K1, _} = eleveldb:iterator_move(Itr, first),
-    {ok, K2, _} = eleveldb:iterator_move(Itr, last),
-    ok = eleveldb:iterator_close(Itr),
-    {e, T1, _, _} = sext:decode(K1),
-    {e, T2, _, _} = sext:decode(K2),
-    {reply, {T1, T2}, State};
+    case eleveldb:iterator_move(Itr, first) of
+        {ok, K1, _} ->
+            {ok, K2, _} = eleveldb:iterator_move(Itr, last),
+            ok = eleveldb:iterator_close(Itr),
+            {e, T1, _, _} = sext:decode(K1),
+            {e, T2, _, _} = sext:decode(K2),
+            {reply, {T1, T2}, State};
+        {error, invalid_iterator} ->
+            {reply, empty, State}
+    end;
 
 handle_call({names, Start, Stop}, From, State) ->
     spawn(fun() -> fold_names(State#state.ref, Start, Stop, From) end),

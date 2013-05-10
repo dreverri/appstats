@@ -36,6 +36,12 @@ timespan_test() ->
     {T1, T2} = appstats_session:timespan(Pid),
     ?assertEqual({T, T+10}, {T1, T2}).
 
+timespan2_test() ->
+    appstats:start(),
+    os:cmd("rm -rf timespan2"),
+    {ok, Pid} = appstats_session:open("timespan2"),
+    ?assertEqual(empty, appstats_session:timespan(Pid)).
+
 names_test() ->
     appstats:start(),
     {ok, Pid} = appstats_session:open("names"),

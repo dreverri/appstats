@@ -48,6 +48,10 @@ content_types_provided(Req, State) ->
 	], Req, State}.
 
 to_json(Req, Pid) ->
-    {T1, T2} = appstats_session:timespan(Pid),
-    Body = jsx:encode([{<<"start">>, T1}, {<<"stop">>, T2}]),
-    {Body, Req, Pid}.
+    Data = case appstats_session:timespan(Pid) of
+        {T1, T2} ->
+            [{<<"start">>, T1}, {<<"stop">>, T2}];
+        empty ->
+            [{}]
+    end,
+    {jsx:encode(Data), Req, Pid}.
