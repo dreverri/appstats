@@ -4,34 +4,29 @@
 
 simple_test() ->
     appstats:start(),
+    os:cmd("rm -rf simple_test"),
     {ok, Pid} = appstats_session:open("simple_test"),
     Start = appstats_session:epoch(),
-    Events = [appstats_session:new_event(N, V, [{timestamp, T}]) || V <- lists:seq(1,1000),
-                                                            N <- [<<"foo">>, <<"bar">>, <<"baz">>],
-                                                            T <- [Start - 1, Start, Start + 1]],
+    Stop = Start + 1,
+    Values = lists:seq(1,1000),
+    Names = [<<"foo">>, <<"bar">>, <<"baz">>],
+    Times = [Start - 1, Start, Start + 1],
+    Events = [new_event(N, V, [{timestamp, T}]) || V <- Values,
+                                                   N <- Names,
+                                                   T <- Times],
     ok = appstats_session:write(Pid, Events),
-    [{Time, [{_, Summary}]}] = appstats_session:read(Pid, <<"foo">>, Start, Start + 1, 1),
+    [{Time,
+      [{_, Summary}]}] = appstats_session:read(Pid, <<"foo">>, Start, Stop, 1),
     ?assertEqual(Start, Time),
     ?assertEqual(13, length(Summary)).
-
-first_and_last_test() ->
-    appstats:start(),
-    os:cmd("rm -rf first_and_last"),
-    {ok, Pid} = appstats_session:open("first_and_last"),
-    T = appstats_session:epoch(),
-    Events = [appstats_session:new_event(<<"foo">>, V, [{timestamp, T+V}]) || V <- lists:seq(0,10)],
-    ok = appstats_session:write(Pid, Events),
-    {_, _, FirstTime, _} = appstats_session:first(Pid),
-    {_, _, LastTime, _} = appstats_session:last(Pid),
-    ?assertEqual(T, FirstTime),
-    ?assertEqual(T+10, LastTime).
 
 timespan_test() ->
     appstats:start(),
     os:cmd("rm -rf timespan"),
     {ok, Pid} = appstats_session:open("timespan"),
     T = appstats_session:epoch(),
-    Events = [appstats_session:new_event(<<"foo">>, V, [{timestamp, T+V}]) || V <- lists:seq(0,10)],
+    Values = lists:seq(0,10),
+    Events = [new_event(<<"foo">>, V, [{timestamp, T+V}]) || V <- Values],
     ok = appstats_session:write(Pid, Events),
     {T1, T2} = appstats_session:timespan(Pid),
     ?assertEqual({T, T+10}, {T1, T2}).
@@ -46,14 +41,24 @@ names_test() ->
     appstats:start(),
     {ok, Pid} = appstats_session:open("names"),
     T = appstats_session:epoch(),
-    Events = [appstats_session:new_event(N, V, [{timestamp, T+V}]) || V <- lists:seq(0,10),
-                                                              N <- [<<"foo">>, <<"bar">>]],
-    Events1 = [appstats_session:new_event(<<"baz">>, 11, [{timestamp, T+11}])|Events],
-    ok = appstats_session:write(Pid, Events1),
-    Names = appstats_session:names(Pid, T, T+10),
-    ?assert(lists:member(<<"foo">>, Names)),
-    ?assert(lists:member(<<"bar">>, Names)),
-    ?assertNot(lists:member(<<"baz">>, Names)).
+    Values = lists:seq(0,10),
+    Names = [<<"foo">>, <<"bar">>, <<"baz">>],
+    Events = [new_event(N, V, [{timestamp, T+V}]) || V <- Values,
+                                                     N <- Names],
+    ok = appstats_session:write(Pid, Events),
+    Names1 = appstats_session:names(Pid),
+    ?assert(lists:member(<<"foo">>, Names1)),
+    ?assert(lists:member(<<"bar">>, Names1)),
+    ?assert(lists:member(<<"baz">>, Names1)).
+
+count_test() ->
+    appstats:start(),
+    os:cmd("rm -rf count"),
+    {ok, Pid} = appstats_session:open("count"),
+    Count = 786,
+    Events = [new_event(<<"foo">>, V) || V <- lists:seq(1, Count)],
+    ok = appstats_session:write(Pid, Events),
+    ?assertEqual(Count, appstats_session:count(Pid)).
 
 sup_test() ->
     appstats:start(),
@@ -63,3 +68,9 @@ sup_test() ->
     Pids = [element(2, appstats_sup:get_worker(Id)) || Id <- Workers],
     ?assert(lists:member(Pid1, Pids)),
     ?assert(lists:member(Pid2, Pids)).
+
+new_event(N, V) ->
+    new_event(N, V, []).
+
+new_event(N, V, Options) ->
+    appstats_session:new_event(N, V, Options).

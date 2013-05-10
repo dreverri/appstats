@@ -35,10 +35,9 @@
          start_link/1,
          write/2,
          read/5,
-         first/1,
-         last/1,
          timespan/1,
-         names/3
+         names/1,
+         count/1
         ]).
 
 %% ------------------------------------------------------------------
@@ -90,17 +89,14 @@ write(Pid, Events) ->
 read(Pid, Name, Start, Stop, Step) ->
     gen_server:call(Pid, {read, Name, Start, Stop, Step}, infinity).
 
-first(Pid) ->
-    gen_server:call(Pid, first).
-
-last(Pid) ->
-    gen_server:call(Pid, last).
-
 timespan(Pid) ->
     gen_server:call(Pid, timespan).
 
-names(Pid, Start, Stop) ->
-    gen_server:call(Pid, {names, Start, Stop}, infinity).
+names(Pid) ->
+    gen_server:call(Pid, names, infinity).
+
+count(Pid) ->
+    gen_server:call(Pid, count).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -126,17 +122,10 @@ handle_call({read, Name, Start, Stop, Step}, From, State) ->
     spawn(fun() -> fold(State#state.ref, Name, Start, Stop, Step, From) end),
     {noreply, State};
 
-handle_call(first, _From, State) ->
-    Event = get_event(State#state.ref, first),
-    {reply, Event, State};
-
-handle_call(last, _From, State) ->
-    Event = get_event(State#state.ref, last),
-    {reply, Event, State};
-
 handle_call(timespan, _From, State) ->
     {ok, Itr} = eleveldb:iterator(State#state.ref, []),
-    case eleveldb:iterator_move(Itr, first) of
+    FirstKey = sext:encode({e, 0, <<>>, 0}),
+    case eleveldb:iterator_move(Itr, FirstKey) of
         {ok, K1, _} ->
             {ok, K2, _} = eleveldb:iterator_move(Itr, last),
             ok = eleveldb:iterator_close(Itr),
@@ -147,9 +136,20 @@ handle_call(timespan, _From, State) ->
             {reply, empty, State}
     end;
 
-handle_call({names, Start, Stop}, From, State) ->
-    spawn(fun() -> fold_names(State#state.ref, Start, Stop, From) end),
+handle_call(names, From, State) ->
+    spawn(fun() -> fold_names(State#state.ref, From) end),
     {noreply, State};
+
+handle_call(count, _From, State) ->
+    {ok, Itr} = eleveldb:iterator(State#state.ref, []),
+    case eleveldb:iterator_move(Itr, last) of
+        {ok, K, _} ->
+            ok = eleveldb:iterator_close(Itr),
+            {e, _, _, Count} = sext:decode(K),
+            {reply, Count, State};
+        _ ->
+            {reply, 0, State}
+    end;
 
 handle_call(ref, _From, State) ->
     {reply, State#state.ref, State}.
@@ -171,18 +171,24 @@ code_change(_OldVsn, State, _Extra) ->
 %% ------------------------------------------------------------------
 
 event_updates(Event, {Acc, State}) ->
-    Count = State#state.count,
+    Count = State#state.count + 1,
     Timestamp = Event#event.timestamp,
     Name = Event#event.name,
     Value = Event#event.value,
     Data = Event#event.data,
     KeyBin = sext:encode({e, Timestamp, Name, Count}),
     ValueBin = term_to_binary({Value, Data}),
-    {[{put, KeyBin, ValueBin}|Acc], State#state{count=Count+1}}.
+    %% Add an entry for each name on each write so we can later get a list of
+    %% metric names. Another option would be to do a full scan each time the
+    %% list is requested. A better solution for listing metric names would be
+    %% nice.
+    NameKey = sext:encode({n, Name}),
+    {[{put, KeyBin, ValueBin}, {put, NameKey, <<>>}|Acc],
+     State#state{count=Count}}.
 
 fold(Ref, Name, Start, Stop, Step, From) ->
     Fun = fold_fun(Name, Start, Stop, Step),
-    FirstKey = sext:encode({e, Start, Name, <<>>}),
+    FirstKey = sext:encode({e, Start, Name, 0}),
     FoldOpts = [{first_key, FirstKey}],
     try
         Results0 = eleveldb:fold(Ref, Fun, [{Start, dict:new()}], FoldOpts),
@@ -217,31 +223,35 @@ summarize(Results) ->
 fold_fun(TargetName, Start, Stop, Step) ->
     LastSlice = slice(Stop, Start, Step),
     fun({KeyBin, ValueBin}, All = [{PreviousSlice, Values}|Acc]) ->
-            {e, Timestamp, Name, _} = sext:decode(KeyBin),
-            Slice = slice(Timestamp, Start, Step),
-            case Slice >= LastSlice of
-                true ->
-                    throw({break, All});
-                false ->
-                    ok
-            end,
-            case match_name(TargetName, Name) of
-                true ->
-                    {V, _Data} = binary_to_term(ValueBin),
-                    if
-                        Slice == PreviousSlice ->
-                            Values1 = dict:append(Name, V, Values),
-                            [{Slice, Values1}|Acc];
-                        Slice == PreviousSlice + Step ->
-                            Values1 = dict:append(Name, V, dict:new()),
-                            [{Slice, Values1}|All];
+            case sext:decode(KeyBin) of
+                {e, Timestamp, Name, _} ->
+                    Slice = slice(Timestamp, Start, Step),
+                    case Slice >= LastSlice of
                         true ->
-                            Holes = holes(PreviousSlice + Step, Slice - Step, Step),
-                            Values1 = dict:append(Name, V, dict:new()),
-                            [{Slice, Values1}|Holes ++ All]
+                            throw({break, All});
+                        false ->
+                            ok
+                    end,
+                    case match_name(TargetName, Name) of
+                        true ->
+                            {V, _Data} = binary_to_term(ValueBin),
+                            if
+                                Slice == PreviousSlice ->
+                                    Values1 = dict:append(Name, V, Values),
+                                    [{Slice, Values1}|Acc];
+                                Slice == PreviousSlice + Step ->
+                                    Values1 = dict:append(Name, V, dict:new()),
+                                    [{Slice, Values1}|All];
+                                true ->
+                                    Holes = holes(PreviousSlice + Step, Slice - Step, Step),
+                                    Values1 = dict:append(Name, V, dict:new()),
+                                    [{Slice, Values1}|Holes ++ All]
+                            end;
+                        false ->
+                            All
                     end;
-                false ->
-                    All
+                _ ->
+                    throw({break, All})
             end
     end.
 
@@ -257,31 +267,21 @@ slice(Ts, Start, Step) ->
 holes(FromSlice, ToSlice, Step) ->
     lists:reverse([{S, dict:new()} || S <- lists:seq(FromSlice, ToSlice, Step)]).
 
-get_event(Ref, Pos) ->
-    {ok, Itr} = eleveldb:iterator(Ref, []),
-    {ok, KeyBin, ValueBin} = eleveldb:iterator_move(Itr, Pos),
-    ok = eleveldb:iterator_close(Itr),
-    {e, Timestamp, Name, _} = sext:decode(KeyBin),
-    {Value, Data} = binary_to_term(ValueBin),
-    {Name, Value, Timestamp, Data}.
-
-fold_names(Ref, Start, Stop, From) ->
-    Fun = fun(KeyBin, Acc) ->
-            {e, Timestamp, Name, _} = sext:decode(KeyBin),
-            case Timestamp >= Stop of
-                true ->
-                    throw({break, Acc});
-                false ->
-                    ok
-            end,
-            sets:add_element(Name, Acc)
+fold_names(Ref, From) ->
+    Fun = fun(NameKey, Acc) ->
+            case sext:decode(NameKey) of
+                {n, Name} ->
+                    [Name|Acc];
+                _ ->
+                    throw({break, Acc})
+            end
     end,
-    FirstKey = sext:encode({e, Start, <<>>, <<>>}),
+    FirstKey = sext:encode({n, <<>>}),
     FoldOpts = [{first_key, FirstKey}],
     try
-        Names = eleveldb:fold_keys(Ref, Fun, sets:new(), FoldOpts),
-        gen_server:reply(From, sets:to_list(Names))
+        Names = eleveldb:fold_keys(Ref, Fun, [], FoldOpts),
+        gen_server:reply(From, Names)
     catch
         {break, Names1} ->
-            gen_server:reply(From, sets:to_list(Names1))
+            gen_server:reply(From, Names1)
     end.
