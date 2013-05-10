@@ -106,7 +106,7 @@ names(Pid, Start, Stop) ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
--record(state, {path, ref}).
+-record(state, {path, ref, count=0}).
 
 init(Path) ->
     filelib:ensure_dir(Path),
@@ -118,9 +118,9 @@ init(Path) ->
     end.
 
 handle_call({write, Events}, _From, State) ->
-    Updates = lists:foldl(fun event_updates/2, [], Events),
-    Reply = eleveldb:write(State#state.ref, Updates, []),
-    {reply, Reply, State};
+    {Updates, State1} = lists:foldl(fun event_updates/2, {[], State}, Events),
+    Reply = eleveldb:write(State1#state.ref, Updates, []),
+    {reply, Reply, State1};
 
 handle_call({read, Name, Start, Stop, Step}, From, State) ->
     spawn(fun() -> fold(State#state.ref, Name, Start, Stop, Step, From) end),
@@ -170,14 +170,15 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
-event_updates(Event, Acc) ->
+event_updates(Event, {Acc, State}) ->
+    Count = State#state.count,
     Timestamp = Event#event.timestamp,
     Name = Event#event.name,
     Value = Event#event.value,
     Data = Event#event.data,
-    KeyBin = sext:encode({e, Timestamp, Name, crypto:rand_bytes(20)}),
+    KeyBin = sext:encode({e, Timestamp, Name, Count}),
     ValueBin = term_to_binary({Value, Data}),
-    [{put, KeyBin, ValueBin}|Acc].
+    {[{put, KeyBin, ValueBin}|Acc], State#state{count=Count+1}}.
 
 fold(Ref, Name, Start, Stop, Step, From) ->
     Fun = fold_fun(Name, Start, Stop, Step),
