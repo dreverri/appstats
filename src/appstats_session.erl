@@ -119,7 +119,7 @@ handle_call({write, Events}, _From, State) ->
     {reply, Reply, State1};
 
 handle_call({read, Name, Start, Stop, Step}, From, State) ->
-    spawn(fun() -> fold(State#state.ref, Name, Start, Stop, Step, From) end),
+    spawn(fun() -> get_summary(State#state.ref, Name, Start, Stop, Step, From) end),
     {noreply, State};
 
 handle_call(timespan, _From, State) ->
@@ -137,7 +137,7 @@ handle_call(timespan, _From, State) ->
     end;
 
 handle_call(names, From, State) ->
-    spawn(fun() -> fold_names(State#state.ref, From) end),
+    spawn(fun() -> get_names(State#state.ref, From) end),
     {noreply, State};
 
 handle_call(count, _From, State) ->
@@ -186,21 +186,38 @@ event_updates(Event, {Acc, State}) ->
     {[{put, KeyBin, ValueBin}, {put, NameKey, <<>>}|Acc],
      State#state{count=Count}}.
 
-fold(Ref, Name, Start, Stop, Step, From) ->
-    Fun = fold_fun(Name, Start, Stop, Step),
-    FirstKey = sext:encode({e, Start, Name, 0}),
-    FoldOpts = [{first_key, FirstKey}],
-    try
-        Results0 = eleveldb:fold(Ref, Fun, [{Start, dict:new()}], FoldOpts),
-        Results = fill_in_the_holes(Results0, Start, Stop, Step),
-        Summary = summarize(Results),
-        gen_server:reply(From, Summary)
-    catch
-        {break, Results1} ->
-            Results2 = fill_in_the_holes(Results1, Start, Stop, Step),
-            Summary1 = summarize(Results2),
-            gen_server:reply(From, Summary1)
-    end.
+get_summary(Ref, TargetName, Start, Stop, Step, From) ->
+    Fun = fun({Name, V, Timestamp, _Data}, All = [{PreviousSlice, Values}|Acc]) ->
+            Slice = slice(Timestamp, Start, Step),
+            case match_name(TargetName, Name) of
+                true ->
+                    if
+                        Slice == PreviousSlice ->
+                            Values1 = dict:append(Name, V, Values),
+                            [{Slice, Values1}|Acc];
+                        Slice == PreviousSlice + Step ->
+                            Values1 = dict:append(Name, V, dict:new()),
+                            [{Slice, Values1}|All];
+                        true ->
+                            Holes = holes(PreviousSlice + Step, Slice - Step, Step),
+                            Values1 = dict:append(Name, V, dict:new()),
+                            [{Slice, Values1}|Holes ++ All]
+                    end;
+                false ->
+                    All
+            end
+    end,
+    OuterAcc = [{Start, dict:new()}],
+    Results0 = event_fold(Ref, Fun, OuterAcc, Start, Stop),
+    Results = fill_in_the_holes(Results0, Start, Stop, Step),
+    Summary = summarize(Results),
+    gen_server:reply(From, Summary).
+
+match_name(undefined, _) ->
+    true;
+
+match_name(TargetName, Name) ->
+    TargetName == Name.
 
 fill_in_the_holes(Results, Start, Stop, Step) ->
     LastSlice = slice(Stop, Start, Step),
@@ -212,6 +229,12 @@ fill_in_the_holes(Results, Start, Stop, Step) ->
             Holes ++ Results
     end.
 
+slice(Ts, Start, Step) ->
+    trunc(Start + trunc((Ts - Start) / Step) * Step).
+
+holes(FromSlice, ToSlice, Step) ->
+    lists:reverse([{S, dict:new()} || S <- lists:seq(FromSlice, ToSlice, Step)]).
+
 summarize(Results) ->
     lists:foldl(fun({T, Values}, Acc) ->
                 Summary = dict:fold(fun(N, V, SliceAcc) ->
@@ -220,58 +243,40 @@ summarize(Results) ->
                 [{T, Summary}|Acc]
         end, [], Results).
 
-fold_fun(TargetName, Start, Stop, Step) ->
-    LastSlice = slice(Stop, Start, Step),
-    fun({KeyBin, ValueBin}, All = [{PreviousSlice, Values}|Acc]) ->
+get_names(Ref, From) ->
+    Names = name_fold(Ref, fun(Name, Acc) -> [Name|Acc] end, []),
+    gen_server:reply(From, Names).
+
+event_fold(Ref, Fun, OuterAcc, Start, Stop) ->
+    OuterFun = fun({KeyBin, ValueBin}, Acc) ->
             case sext:decode(KeyBin) of
                 {e, Timestamp, Name, _} ->
-                    Slice = slice(Timestamp, Start, Step),
-                    case Slice >= LastSlice of
+                    case Timestamp >= Stop of
                         true ->
-                            throw({break, All});
+                            throw({break, Acc});
                         false ->
                             ok
                     end,
-                    case match_name(TargetName, Name) of
-                        true ->
-                            {V, _Data} = binary_to_term(ValueBin),
-                            if
-                                Slice == PreviousSlice ->
-                                    Values1 = dict:append(Name, V, Values),
-                                    [{Slice, Values1}|Acc];
-                                Slice == PreviousSlice + Step ->
-                                    Values1 = dict:append(Name, V, dict:new()),
-                                    [{Slice, Values1}|All];
-                                true ->
-                                    Holes = holes(PreviousSlice + Step, Slice - Step, Step),
-                                    Values1 = dict:append(Name, V, dict:new()),
-                                    [{Slice, Values1}|Holes ++ All]
-                            end;
-                        false ->
-                            All
-                    end;
+                    {Value, Data} = binary_to_term(ValueBin),
+                    Fun({Name, Value, Timestamp, Data}, Acc);
                 _ ->
-                    throw({break, All})
+                    throw({break, Acc})
             end
+    end,
+    FirstKey = sext:encode({e, Start, <<>>, 0}),
+    FoldOpts = [{first_key, FirstKey}],
+    try
+        eleveldb:fold(Ref, OuterFun, OuterAcc, FoldOpts)
+    catch
+        {break, Results} ->
+            Results
     end.
 
-match_name(undefined, _) ->
-    true;
-
-match_name(TargetName, Name) ->
-    TargetName == Name.
-
-slice(Ts, Start, Step) ->
-    trunc(Start + trunc((Ts - Start) / Step) * Step).
-
-holes(FromSlice, ToSlice, Step) ->
-    lists:reverse([{S, dict:new()} || S <- lists:seq(FromSlice, ToSlice, Step)]).
-
-fold_names(Ref, From) ->
-    Fun = fun(NameKey, Acc) ->
-            case sext:decode(NameKey) of
+name_fold(Ref, Fun, OuterAcc) ->
+    OuterFun = fun(KeyBin, Acc) ->
+            case sext:decode(KeyBin) of
                 {n, Name} ->
-                    [Name|Acc];
+                    Fun(Name, Acc);
                 _ ->
                     throw({break, Acc})
             end
@@ -279,9 +284,8 @@ fold_names(Ref, From) ->
     FirstKey = sext:encode({n, <<>>}),
     FoldOpts = [{first_key, FirstKey}],
     try
-        Names = eleveldb:fold_keys(Ref, Fun, [], FoldOpts),
-        gen_server:reply(From, Names)
+        eleveldb:fold_keys(Ref, OuterFun, OuterAcc, FoldOpts)
     catch
-        {break, Names1} ->
-            gen_server:reply(From, Names1)
+        {break, Results} ->
+            Results
     end.
