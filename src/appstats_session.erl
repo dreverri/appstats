@@ -30,10 +30,10 @@
          write/2,
          read/6,
          summarize/5,
-         summarize1/5,
          timespan/1,
          types/1,
-         count/1
+         count/1,
+         close/1
         ]).
 
 %% ------------------------------------------------------------------
@@ -65,8 +65,6 @@ start_link(Path) ->
 write(Pid, Events) ->
     gen_server:call(Pid, {write, Events}).
 
-%% TODO: don't do binary:split() for Field extraction or list_to_tuple
-%% users should provide an ej path
 %% Query :: {Type, Filters, Extract, Aggregate}
 %% Type :: binary()
 %% Filters :: [Filter]
@@ -82,10 +80,6 @@ read(Pid, Start, Stop, Query, Limit, SortBy) ->
 summarize(Pid, Start, Stop, Step, Query) ->
     gen_server:call(Pid, {summarize, Start, Stop, Step, Query}, infinity).
 
-%% this method is slower
-summarize1(Pid, Start, Stop, Step, Query) ->
-    gen_server:call(Pid, {summarize1, Start, Stop, Step, Query}, infinity).
-
 types(Pid) ->
     gen_server:call(Pid, types, infinity).
 
@@ -94,6 +88,9 @@ timespan(Pid) ->
 
 count(Pid) ->
     gen_server:call(Pid, count).
+
+close(Pid) ->
+    gen_server:call(Pid, stop).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -106,7 +103,8 @@ init(Path) ->
     Options = [{create_if_missing, true}, {compression, true}],
     case eleveldb:open(Path, Options) of
         {ok, Ref} ->
-            {ok, #state{path=Path, ref=Ref}};
+            Count = get_count(Ref),
+            {ok, #state{path=Path, ref=Ref, count=Count}};
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -130,13 +128,6 @@ handle_call({summarize, Start, Stop, Step, Query}, From, State) ->
     spawn(Fun),
     {noreply, State};
 
-handle_call({summarize1, Start, Stop, Step, Query}, From, State) ->
-    Fun = fun() ->
-            get_summary1(State#state.ref, Start, Stop, Step, Query, From)
-    end,
-    spawn(Fun),
-    {noreply, State};
-
 handle_call(timespan, _From, State) ->
     {ok, Itr} = eleveldb:iterator(State#state.ref, []),
     FirstKey = sext:encode({e, 0, <<>>, 0}),
@@ -156,18 +147,14 @@ handle_call(types, From, State) ->
     {noreply, State};
 
 handle_call(count, _From, State) ->
-    {ok, Itr} = eleveldb:iterator(State#state.ref, []),
-    case eleveldb:iterator_move(Itr, last) of
-        {ok, K, _} ->
-            ok = eleveldb:iterator_close(Itr),
-            {e, _, _, Count} = sext:decode(K),
-            {reply, Count, State};
-        _ ->
-            {reply, 0, State}
-    end;
+    Count = get_count(State#state.ref),
+    {reply, Count, State};
 
 handle_call(ref, _From, State) ->
-    {reply, State#state.ref, State}.
+    {reply, State#state.ref, State};
+
+handle_call(stop, _From, State) ->
+    {stop, normal, ok, State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -175,8 +162,8 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok.
+terminate(_Reason, State) ->
+    eleveldb:close(State#state.ref).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -184,6 +171,16 @@ code_change(_OldVsn, State, _Extra) ->
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
+
+get_count(Ref) ->
+    {ok, Itr} = eleveldb:iterator(Ref, []),
+    case eleveldb:iterator_move(Itr, last) of
+        {ok, K, _} ->
+            {e, _, _, Count} = sext:decode(K),
+            Count;
+        {error, invalid_iterator} ->
+            0
+    end.
 
 event_updates(Event, {Acc, State}) ->
     Count = State#state.count + 1,
@@ -201,9 +198,7 @@ event_updates(Event, {Acc, State}) ->
      State#state{count=Count}}.
 
 get_events(Ref, Start, Stop, Query, Limit, SortBy, From) ->
-    FirstKey = sext:encode({e, Start, <<>>, 0}),
-    LastKey = sext:encode({e, Stop, <<>>, 0}),
-    Events = event_table(Ref, [{first_key, FirstKey}, {last_key, LastKey}]),
+    Events = event_table(Ref, Start, Stop),
     QH = qlc:q([Event || Event <- Events, is_match(Query, Event)]),
     QH1 = case is_binary(SortBy) of
         true ->
@@ -225,39 +220,13 @@ get_events(Ref, Start, Stop, Query, Limit, SortBy, From) ->
             gen_server:reply(From, qlc:eval(QH1))
     end.
 
-is_valid_limit(Limit) ->
-    is_integer(Limit) andalso Limit > 0.
-
-get_summary1(Ref, Start, Stop, Step, Query, From) ->
+get_summary(Ref, Start, Stop, Step, Query, From) ->
     Slices = slice_table(Ref, Start, Stop, Step, Query),
     QH = qlc:q([{T, bear:get_statistics(Values)} || {T, Values} <- Slices]),
     gen_server:reply(From, qlc:eval(QH)).
 
-get_summary(Ref, Start, Stop, Step, Query, From) ->
-    Fun = fun(Event, All = [{PrevSlice, Values}|Acc]) ->
-            Slice = slice(Event#event.time, Start, Step),
-            NextSlice = PrevSlice + Step,
-            case is_match(Query, Event) of
-                true ->
-                    Value = extract(Query, Event),
-                    if
-                        Slice == PrevSlice ->
-                            [{Slice, [Value|Values]}|Acc];
-                        Slice == NextSlice ->
-                            [{Slice, [Value]}|All];
-                        true ->
-                            Holes = holes(NextSlice, Slice - Step, Step),
-                            [{Slice, [Value]}|Holes ++ All]
-                    end;
-                false ->
-                    All
-            end
-    end,
-    OuterAcc = [{Start, []}],
-    Results0 = event_fold(Ref, Fun, OuterAcc, Start, Stop),
-    Results = fill_in_the_holes(Results0, Start, Stop, Step),
-    Summary = summarize(Results, Query),
-    gen_server:reply(From, Summary).
+is_valid_limit(Limit) ->
+    is_integer(Limit) andalso Limit > 0.
 
 is_match({Type, Filters, _, _}, Event) when is_list(Filters) ->
     case appstats_event:is_type(Type, Event) of
@@ -281,56 +250,9 @@ extract({_, _, Field, _}, Event) ->
 extract(_Query, _Event) ->
     1.
 
-fill_in_the_holes(Results, Start, Stop, Step) ->
-    LastSlice = slice(Stop, Start, Step),
-    case Results of
-        [{LastSlice, _}|_] ->
-            Results;
-        [{PrevSlice, _}|_] ->
-            Holes = holes(PrevSlice + Step, LastSlice - Step, Step),
-            Holes ++ Results
-    end.
-
-slice(Ts, Start, Step) ->
-    trunc(Start + trunc((Ts - Start) / Step) * Step).
-
-holes(FromSlice, ToSlice, Step) ->
-    lists:reverse([{S, []} || S <- lists:seq(FromSlice, ToSlice, Step)]).
-
-summarize(Results, _Query) ->
-    lists:foldl(fun({T, Values}, Acc) ->
-                Summary = bear:get_statistics(Values),
-                [{T, Summary}|Acc]
-        end, [], Results).
-
 get_types(Ref, From) ->
     Types = type_fold(Ref, fun(Type, Acc) -> [Type|Acc] end, []),
     gen_server:reply(From, Types).
-
-event_fold(Ref, Fun, OuterAcc, Start, Stop) ->
-    OuterFun = fun({KeyBin, ValueBin}, Acc) ->
-            case sext:decode(KeyBin) of
-                {e, Time, Type, _} ->
-                    case Time >= Stop of
-                        true ->
-                            throw({break, Acc});
-                        false ->
-                            ok
-                    end,
-                    Data = binary_to_term(ValueBin),
-                    Fun(#event{type=Type, data=Data, time=Time}, Acc);
-                _ ->
-                    throw({break, Acc})
-            end
-    end,
-    FirstKey = sext:encode({e, Start, <<>>, 0}),
-    FoldOpts = [{first_key, FirstKey}],
-    try
-        eleveldb:fold(Ref, OuterFun, OuterAcc, FoldOpts)
-    catch
-        {break, Results} ->
-            Results
-    end.
 
 type_fold(Ref, Fun, OuterAcc) ->
     OuterFun = fun(KeyBin, Acc) ->
@@ -353,11 +275,9 @@ type_fold(Ref, Fun, OuterAcc) ->
 -record(slice, {time, last_key, step, q, values=[], itr}).
 
 slice_table(Ref, Start, Stop, Step, Query) ->
-    FirstKey = sext:encode({e, Start, <<>>, 0}),
-    LastKey = sext:encode({e, Stop, <<>>, 0}),
-    Options = [],
+    {FirstKey, LastKey} = event_keys(Start, Stop),
     PreFun = fun(_) ->
-            {ok, Itr} = eleveldb:iterator(Ref, Options),
+            {ok, Itr} = eleveldb:iterator(Ref, []),
             put(iterator, Itr)
     end,
     PostFun = fun() ->
@@ -367,42 +287,51 @@ slice_table(Ref, Start, Stop, Step, Query) ->
     TF = fun() ->
             Itr = get(iterator),
             Slice = #slice{time=Start, last_key=LastKey, step=Step, q=Query, itr=Itr},
-            slice_next(eleveldb:iterator_move(Itr, FirstKey), Slice)
+            slice_next_item(eleveldb:iterator_move(Itr, FirstKey), Slice)
     end,
     qlc:table(TF, [{pre_fun, PreFun}, {post_fun, PostFun}]).
 
-slice_next({ok, K, V}, Slice) ->
+slice_next_item({ok, K, V}, Slice) ->
     case K >= Slice#slice.last_key of
         true ->
             [{Slice#slice.time, Slice#slice.values} | []];
         false ->
             Event = to_event(K, V),
-            NextTime = Slice#slice.time + Slice#slice.step,
-            case Event#event.time < NextTime of
-                true ->
-                    Values = case is_match(Slice#slice.q, Event) of
-                        true ->
-                            Value = extract(Slice#slice.q, Event),
-                            [Value|Slice#slice.values];
-                        false ->
-                            Slice#slice.values
-                    end,
-                    Itr = Slice#slice.itr,
-                    NextItem = eleveldb:iterator_move(Itr, next),
-                    slice_next(NextItem, Slice#slice{values=Values});
-                false ->
-                    %% TODO: fill in the holes
-                    NextSlice = Slice#slice{values=[], time=NextTime},
-                    Fun = fun() -> slice_next({ok, K, V}, NextSlice) end,
-                    [{Slice#slice.time, Slice#slice.values} | Fun]
-            end
+            slice_next_event(Event, Slice)
     end;
 
-slice_next(_, Slice) ->
+slice_next_item(_, Slice) ->
     [{Slice#slice.time, Slice#slice.values} | []].
 
-event_table(Ref, Options) ->
+slice_next_event(Event, Slice) ->
+    NextTime = Slice#slice.time + Slice#slice.step,
+    case Event#event.time < NextTime of
+        true ->
+            Values = case is_match(Slice#slice.q, Event) of
+                true ->
+                    Value = extract(Slice#slice.q, Event),
+                    [Value|Slice#slice.values];
+                false ->
+                    Slice#slice.values
+            end,
+            Itr = Slice#slice.itr,
+            NextItem = eleveldb:iterator_move(Itr, next),
+            slice_next_item(NextItem, Slice#slice{values=Values});
+        false ->
+            NextSlice = Slice#slice{values=[], time=NextTime},
+            Fun = fun() -> slice_next_event(Event, NextSlice) end,
+            [{Slice#slice.time, Slice#slice.values} | Fun]
+    end.
+
+event_table(Ref, Start, Stop) ->
+    {FirstKey, LastKey} = event_keys(Start, Stop),
+    Options = [{first_key, FirstKey}, {last_key, LastKey}],
     qlc:q([to_event(K, V) || {K, V} <- eleveldb_table(Ref, Options)]).
+
+event_keys(Start, Stop) ->
+    FirstKey = sext:encode({e, Start, <<>>, 0}),
+    LastKey = sext:encode({e, Stop, <<>>, 0}),
+    {FirstKey, LastKey}.
 
 to_event(KeyBin, ValueBin) ->
     {e, Time, Type, _} = sext:decode(KeyBin),
