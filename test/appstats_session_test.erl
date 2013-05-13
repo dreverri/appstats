@@ -2,75 +2,120 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-simple_test() ->
+appstats_test_() ->
     appstats:start(),
-    os:cmd("rm -rf simple_test"),
-    {ok, Pid} = appstats_session:open("simple_test"),
-    Start = appstats_session:epoch(),
+    Tests = [fun read/0,
+             fun summarize/0,
+             fun timespan/0,
+             fun types/0,
+             fun count/0
+            ],
+    [wrap(Test) || Test <- Tests].
+
+wrap(Fun) ->
+    %% Error reporting from eunit can be less than useful. This will report
+    %% useful information from any errors, exits, or throws; after reporting
+    %% it'll re-raise the caught exception.
+    fun() ->
+            try
+                Fun()
+            catch
+                Type:Reason ->
+                    error_logger:error_report([{type, Type},
+                                               {reason, Reason},
+                                               {st, erlang:get_stacktrace()}]),
+                    erlang:Type(Reason)
+            end
+    end.
+
+%% test functions
+
+read() ->
+    {ok, Pid} = open("read_test"),
+    Start = appstats_event:epoch(),
     Stop = Start + 1,
     Values = lists:seq(1,1000),
-    Names = [<<"foo">>, <<"bar">>, <<"baz">>],
     Times = [Start - 1, Start, Start + 1],
-    Events = [new_event(N, V, [{timestamp, T}]) || V <- Values,
-                                                   N <- Names,
-                                                   T <- Times],
+    Events = [new_event(<<"foo">>, [{<<"value">>, Value}], Time) || 
+            Value <- Values, Time <- Times],
     ok = appstats_session:write(Pid, Events),
-    [{Time,
-      [{_, Summary}]}] = appstats_session:read(Pid, <<"foo">>, Start, Stop, 1),
-    ?assertEqual(Start, Time),
-    ?assertEqual(13, length(Summary)).
+    Query = {<<"foo">>, [], <<"value">>, undefined},
+    [Event] = appstats_session:read(Pid, Start, Stop, Query, 1, undefined),
+    ?assertEqual({event, <<"foo">>, [{<<"value">>, 1}], Start}, Event).
 
-timespan_test() ->
-    appstats:start(),
-    os:cmd("rm -rf timespan"),
-    {ok, Pid} = appstats_session:open("timespan"),
-    T = appstats_session:epoch(),
-    Values = lists:seq(0,10),
-    Events = [new_event(<<"foo">>, V, [{timestamp, T+V}]) || V <- Values],
+summarize() ->
+    {ok, Pid} = open("summarize_test"),
+    Start = appstats_event:epoch(),
+    Stop = Start + 100,
+    Values = lists:seq(1,100),
+    Times = lists:seq(Start, Stop),
+    Events = [new_event(<<"foo">>, [{<<"value">>, V}], T) ||
+            V <- Values, T <- Times],
     ok = appstats_session:write(Pid, Events),
-    {T1, T2} = appstats_session:timespan(Pid),
-    ?assertEqual({T, T+10}, {T1, T2}).
+    Query = {<<"foo">>, [], <<"value">>, all},
+    Step = 10,
+    Results = appstats_session:summarize(Pid, Start, Stop, Step, Query),
+    %% expect 10 slices
+    %% each slice aggregating <<"value">> in 10ms steps
+    %% 100 Values per 1ms (max: 100, min: 1, mean: 50.5, n: 1000)
+    ?assertEqual(10, length(Results)),
+    {Start, Summary} = hd(Results),
+    ?assertEqual(1, proplists:get_value(min, Summary)),
+    ?assertEqual(50.5, proplists:get_value(arithmetic_mean, Summary)),
+    ?assertEqual(100, proplists:get_value(max, Summary)),
+    ?assertEqual(1000, proplists:get_value(n, Summary)).
 
-timespan2_test() ->
-    appstats:start(),
-    os:cmd("rm -rf timespan2"),
-    {ok, Pid} = appstats_session:open("timespan2"),
-    ?assertEqual(empty, appstats_session:timespan(Pid)).
-
-names_test() ->
-    appstats:start(),
-    {ok, Pid} = appstats_session:open("names"),
-    T = appstats_session:epoch(),
-    Values = lists:seq(0,10),
-    Names = [<<"foo">>, <<"bar">>, <<"baz">>],
-    Events = [new_event(N, V, [{timestamp, T+V}]) || V <- Values,
-                                                     N <- Names],
+timespan() ->
+    {ok, Pid} = open("timespan_test"),
+    Start = appstats_event:epoch(),
+    Stop = Start + 1000,
+    Step = 100,
+    Times = lists:seq(Start, Stop, Step),
+    Values = lists:seq(1,100),
+    Events = [new_event(<<"foo">>, [{<<"value">>, V}], T) ||
+            V <- Values, T <- Times],
     ok = appstats_session:write(Pid, Events),
-    Names1 = appstats_session:names(Pid),
-    ?assert(lists:member(<<"foo">>, Names1)),
-    ?assert(lists:member(<<"bar">>, Names1)),
-    ?assert(lists:member(<<"baz">>, Names1)).
+    Timespan = appstats_session:timespan(Pid),
+    ?assertEqual(Start, proplists:get_value(start, Timespan)),
+    ?assertEqual(Stop, proplists:get_value(stop, Timespan)).
 
-count_test() ->
-    appstats:start(),
-    os:cmd("rm -rf count"),
-    {ok, Pid} = appstats_session:open("count"),
-    Count = 786,
-    Events = [new_event(<<"foo">>, V) || V <- lists:seq(1, Count)],
+types() ->
+    {ok, Pid} = open("types"),
+    Types = [<<"foo">>, <<"bar">>, <<"baz">>],
+    Start = appstats_event:epoch(),
+    Stop = Start + 1000,
+    Step = 100,
+    Times = lists:seq(Start, Stop, Step),
+    Values = lists:seq(1,100),
+    Events = [new_event(Type, [{<<"value">>, V}], T) ||
+            Type <- Types, V <- Values, T <- Times],
     ok = appstats_session:write(Pid, Events),
-    ?assertEqual(Count, appstats_session:count(Pid)).
+    Results = appstats_session:types(Pid),
+    [?assert(lists:member(Type, Results)) || Type <- Types].
 
-sup_test() ->
-    appstats:start(),
-    {ok, Pid1} = appstats_session:open("a"),
-    {ok, Pid2} = appstats_session:open("b"),
-    Workers = appstats_sup:list_workers(),
-    Pids = [element(2, appstats_sup:get_worker(Id)) || Id <- Workers],
-    ?assert(lists:member(Pid1, Pids)),
-    ?assert(lists:member(Pid2, Pids)).
+count() ->
+    {ok, Pid} = open("count"),
+    Start = appstats_event:epoch(),
+    Stop = Start + 1000,
+    Step = 100,
+    Times = lists:seq(Start, Stop, Step),
+    Values = lists:seq(1,100),
+    Events = [new_event(<<"foo">>, [{<<"value">>, V}], T) ||
+            V <- Values, T <- Times],
+    ok = appstats_session:write(Pid, Events),
+    %% 11 steps, 100 events per step => 1000 total events
+    ?assertEqual(1100, appstats_session:count(Pid)).
 
-new_event(N, V) ->
-    new_event(N, V, []).
+%% utility functions
 
-new_event(N, V, Options) ->
-    appstats_session:new_event(N, V, Options).
+open(Name) ->
+    os:cmd(["rm -rf ", Name]),
+    appstats_session:open(Name).
+
+new_event(Type, Data, Time) ->
+    case appstats_event:new(Type, Data, Time) of
+        {ok, Event} ->
+            Event;
+        Error ->
+            throw(Error)
+    end.
