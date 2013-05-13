@@ -63,5 +63,4 @@ is_match(_Filter, _Event) ->
     false.
 
 field_value(Field, Event) ->
-    Keys = list_to_tuple(binary:split(Field, <<".">>, [global])),
-    ej:get(Keys, Event#event.data).
+    ej:get(Field, Event#event.data).

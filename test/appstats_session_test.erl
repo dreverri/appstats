@@ -39,7 +39,7 @@ read() ->
     Events = [new_event(<<"foo">>, [{<<"value">>, Value}], Time) || 
             Value <- Values, Time <- Times],
     ok = appstats_session:write(Pid, Events),
-    Query = {<<"foo">>, [], <<"value">>, undefined},
+    Query = {<<"foo">>, [], {<<"value">>}, undefined},
     [Event] = appstats_session:read(Pid, Start, Stop, Query, 1, undefined),
     ?assertEqual({event, <<"foo">>, [{<<"value">>, 1}], Start}, Event).
 
@@ -52,7 +52,7 @@ summarize() ->
     Events = [new_event(<<"foo">>, [{<<"value">>, V}], T) ||
             V <- Values, T <- Times],
     ok = appstats_session:write(Pid, Events),
-    Query = {<<"foo">>, [], <<"value">>, all},
+    Query = {<<"foo">>, [], {<<"value">>}, all},
     Step = 10,
     Results = appstats_session:summarize(Pid, Start, Stop, Step, Query),
     %% expect 10 slices

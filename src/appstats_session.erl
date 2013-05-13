@@ -30,6 +30,7 @@
          write/2,
          read/6,
          summarize/5,
+         summarize1/5,
          timespan/1,
          types/1,
          count/1
@@ -64,12 +65,14 @@ start_link(Path) ->
 write(Pid, Events) ->
     gen_server:call(Pid, {write, Events}).
 
+%% TODO: don't do binary:split() for Field extraction or list_to_tuple
+%% users should provide an ej path
 %% Query :: {Type, Filters, Extract, Aggregate}
 %% Type :: binary()
 %% Filters :: [Filter]
 %% Filter :: {FilterType, Field, Value}
 %% FilterType :: eq
-%% Field :: binary()
+%% Field :: {binary()}
 %% Value :: binary() | float() | integer() | true | false
 %% Extract :: Field
 %% Aggregate :: all
@@ -78,6 +81,10 @@ read(Pid, Start, Stop, Query, Limit, SortBy) ->
 
 summarize(Pid, Start, Stop, Step, Query) ->
     gen_server:call(Pid, {summarize, Start, Stop, Step, Query}, infinity).
+
+%% this method is slower
+summarize1(Pid, Start, Stop, Step, Query) ->
+    gen_server:call(Pid, {summarize1, Start, Stop, Step, Query}, infinity).
 
 types(Pid) ->
     gen_server:call(Pid, types, infinity).
@@ -119,6 +126,13 @@ handle_call({read, Start, Stop, Query, Limit, SortBy}, From, State) ->
 handle_call({summarize, Start, Stop, Step, Query}, From, State) ->
     Fun = fun() ->
             get_summary(State#state.ref, Start, Stop, Step, Query, From)
+    end,
+    spawn(Fun),
+    {noreply, State};
+
+handle_call({summarize1, Start, Stop, Step, Query}, From, State) ->
+    Fun = fun() ->
+            get_summary1(State#state.ref, Start, Stop, Step, Query, From)
     end,
     spawn(Fun),
     {noreply, State};
@@ -214,6 +228,11 @@ get_events(Ref, Start, Stop, Query, Limit, SortBy, From) ->
 is_valid_limit(Limit) ->
     is_integer(Limit) andalso Limit > 0.
 
+get_summary1(Ref, Start, Stop, Step, Query, From) ->
+    Slices = slice_table(Ref, Start, Stop, Step, Query),
+    QH = qlc:q([{T, bear:get_statistics(Values)} || {T, Values} <- Slices]),
+    gen_server:reply(From, qlc:eval(QH)).
+
 get_summary(Ref, Start, Stop, Step, Query, From) ->
     Fun = fun(Event, All = [{PrevSlice, Values}|Acc]) ->
             Slice = slice(Event#event.time, Start, Step),
@@ -235,13 +254,6 @@ get_summary(Ref, Start, Stop, Step, Query, From) ->
             end
     end,
     OuterAcc = [{Start, []}],
-
-    % TODO: consider using qlc:fold/3
-    %FirstKey = sext:encode({e, Start, <<>>, 0}),
-    %LastKey = sext:encode({e, Stop, <<>>, 0}),
-    %Events = event_table(Ref, [{first_key, FirstKey}, {last_key, LastKey}]),
-    %Results0 = qlc:fold(Fun, OuterAcc, Events),
-
     Results0 = event_fold(Ref, Fun, OuterAcc, Start, Stop),
     Results = fill_in_the_holes(Results0, Start, Stop, Step),
     Summary = summarize(Results, Query),
@@ -336,6 +348,49 @@ type_fold(Ref, Fun, OuterAcc) ->
     catch
         {break, Results} ->
             Results
+    end.
+
+-record(slice, {time, step, q, values=[], cursor}).
+
+slice_table(Ref, Start, Stop, Step, Query) ->
+    FirstKey = sext:encode({e, Start, <<>>, 0}),
+    LastKey = sext:encode({e, Stop, <<>>, 0}),
+    Options = [{first_key, FirstKey}, {last_key, LastKey}],
+    PreFun = fun(_) ->
+            Cursor = qlc:cursor(event_table(Ref, Options)),
+            put(cursor, Cursor)
+    end,
+    PostFun = fun() ->
+            Cursor = get(cursor),
+            qlc:delete_cursor(Cursor)
+    end,
+    TF = fun() ->
+            Cursor = get(cursor),
+            Slice = #slice{time=Start, step=Step, q=Query, cursor=Cursor},
+            slice_next(qlc:next_answers(Cursor, 1), Slice)
+    end,
+    qlc:table(TF, [{pre_fun, PreFun}, {post_fun, PostFun}]).
+
+slice_next([], Slice) ->
+    [{Slice#slice.time, Slice#slice.values} | []];
+
+slice_next([Event], Slice) ->
+    NextTime = Slice#slice.time + Slice#slice.step,
+    case Event#event.time < NextTime of
+        true ->
+            Values = case is_match(Slice#slice.q, Event) of
+                true ->
+                    Value = extract(Slice#slice.q, Event),
+                    [Value|Slice#slice.values];
+                false ->
+                    Slice#slice.values
+            end,
+            Cursor = Slice#slice.cursor,
+            slice_next(qlc:next_answers(Cursor, 1), Slice#slice{values=Values});
+        false ->
+            NextSlice = Slice#slice{values=[], time=NextTime},
+            Fun = fun() -> slice_next([Event], NextSlice) end,
+            [{Slice#slice.time, Slice#slice.values} | Fun]
     end.
 
 event_table(Ref, Options) ->
