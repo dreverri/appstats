@@ -350,48 +350,56 @@ type_fold(Ref, Fun, OuterAcc) ->
             Results
     end.
 
--record(slice, {time, step, q, values=[], cursor}).
+-record(slice, {time, last_key, step, q, values=[], itr}).
 
 slice_table(Ref, Start, Stop, Step, Query) ->
     FirstKey = sext:encode({e, Start, <<>>, 0}),
     LastKey = sext:encode({e, Stop, <<>>, 0}),
-    Options = [{first_key, FirstKey}, {last_key, LastKey}],
+    Options = [],
     PreFun = fun(_) ->
-            Cursor = qlc:cursor(event_table(Ref, Options)),
-            put(cursor, Cursor)
+            {ok, Itr} = eleveldb:iterator(Ref, Options),
+            put(iterator, Itr)
     end,
     PostFun = fun() ->
-            Cursor = get(cursor),
-            qlc:delete_cursor(Cursor)
+            Itr = get(iterator),
+            eleveldb:iterator_close(Itr)
     end,
     TF = fun() ->
-            Cursor = get(cursor),
-            Slice = #slice{time=Start, step=Step, q=Query, cursor=Cursor},
-            slice_next(qlc:next_answers(Cursor, 1), Slice)
+            Itr = get(iterator),
+            Slice = #slice{time=Start, last_key=LastKey, step=Step, q=Query, itr=Itr},
+            slice_next(eleveldb:iterator_move(Itr, FirstKey), Slice)
     end,
     qlc:table(TF, [{pre_fun, PreFun}, {post_fun, PostFun}]).
 
-slice_next([], Slice) ->
-    [{Slice#slice.time, Slice#slice.values} | []];
-
-slice_next([Event], Slice) ->
-    NextTime = Slice#slice.time + Slice#slice.step,
-    case Event#event.time < NextTime of
+slice_next({ok, K, V}, Slice) ->
+    case K >= Slice#slice.last_key of
         true ->
-            Values = case is_match(Slice#slice.q, Event) of
-                true ->
-                    Value = extract(Slice#slice.q, Event),
-                    [Value|Slice#slice.values];
-                false ->
-                    Slice#slice.values
-            end,
-            Cursor = Slice#slice.cursor,
-            slice_next(qlc:next_answers(Cursor, 1), Slice#slice{values=Values});
+            [{Slice#slice.time, Slice#slice.values} | []];
         false ->
-            NextSlice = Slice#slice{values=[], time=NextTime},
-            Fun = fun() -> slice_next([Event], NextSlice) end,
-            [{Slice#slice.time, Slice#slice.values} | Fun]
-    end.
+            Event = to_event(K, V),
+            NextTime = Slice#slice.time + Slice#slice.step,
+            case Event#event.time < NextTime of
+                true ->
+                    Values = case is_match(Slice#slice.q, Event) of
+                        true ->
+                            Value = extract(Slice#slice.q, Event),
+                            [Value|Slice#slice.values];
+                        false ->
+                            Slice#slice.values
+                    end,
+                    Itr = Slice#slice.itr,
+                    NextItem = eleveldb:iterator_move(Itr, next),
+                    slice_next(NextItem, Slice#slice{values=Values});
+                false ->
+                    %% TODO: fill in the holes
+                    NextSlice = Slice#slice{values=[], time=NextTime},
+                    Fun = fun() -> slice_next({ok, K, V}, NextSlice) end,
+                    [{Slice#slice.time, Slice#slice.values} | Fun]
+            end
+    end;
+
+slice_next(_, Slice) ->
+    [{Slice#slice.time, Slice#slice.values} | []].
 
 event_table(Ref, Options) ->
     qlc:q([to_event(K, V) || {K, V} <- eleveldb_table(Ref, Options)]).
